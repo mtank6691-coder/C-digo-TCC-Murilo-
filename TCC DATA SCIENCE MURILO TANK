@@ -1,0 +1,425 @@
+# ----------------------------------------------------
+# 1. Instalação e Carregamento de Pacotes Necessários
+# ----------------------------------------------------
+
+# Verifica e instala pacotes que ainda não estão instalados
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("forecast")) install.packages("forecast")
+if (!require("factoextra")) install.packages("factoextra")
+if (!require("cluster")) install.packages("cluster")
+if (!require("readr")) install.packages("readr")
+if (!require("e1071")) install.packages("e1071")
+if (!require("caret")) install.packages("caret")
+if (!require("reshape2")) install.packages("reshape2") 
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("randomForest")) install.packages("randomForest")
+if (!require("corrplot")) install.packages("corrplot")
+
+# Carrega todos os pacotes para o ambiente de trabalho
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(factoextra)
+library(cluster)
+library(readr)
+library(e1071)
+library(caret)
+library(reshape2)
+library(ggplot2)
+library(randomForest)
+library(corrplot)
+
+# ----------------------------------------------------
+# 2. Carregamento e Preparação dos Dados
+# ----------------------------------------------------
+
+print("Iniciando o carregamento e a preparação dos dados...")
+
+# Carregamento do arquivo CSV usando o caminho COMPLETO para evitar erros.
+dados_aquicultura <- read_delim("C:/Users/mtank/Downloads/Nova pasta (9)/Aquicultura.csv", 
+                                delim = ";", 
+                                locale = locale(decimal_mark = ",", grouping_mark = "."),
+                                col_types = cols(
+                                  `Nomes das Regiões` = col_factor(),
+                                  Ano = col_integer(),
+                                  Espécie = col_factor(),
+                                  `Produção (kg)` = col_number(),
+                                  `Reais (R$)` = col_number()
+                                ))
+
+# Limpeza e preparação inicial dos dados
+dados_limpos <- dados_aquicultura %>%
+  rename(Regiao = `Nomes das Regiões`,
+         Producao_kg = `Produção (kg)`,
+         Reais_RS = `Reais (R$)`) %>%
+  mutate(Producao_kg = as.numeric(gsub("\\.", "", Producao_kg)),
+         Reais_RS = as.numeric(gsub("\\.", "", Reais_RS))) %>%
+  filter(!is.na(Regiao) & !is.na(Espécie) & !is.na(Ano)) %>%
+  filter(Producao_kg > 0)
+
+print("Dados carregados e limpos com sucesso.")
+
+# ----------------------------------------------------
+# 3. Análise Exploratória e Visualização
+# ----------------------------------------------------
+
+print("Gerando gráficos de análise exploratória...")
+
+# Gráfico de produção total por região e ano
+producao_por_regiao <- dados_limpos %>%
+  group_by(Regiao, Ano) %>%
+  summarise(Producao_Total = sum(Producao_kg, na.rm = TRUE), .groups = 'drop')
+
+ggplot(producao_por_regiao, aes(x = as.factor(Ano), y = Producao_Total, fill = Regiao)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Produção Total por Região ao Longo dos Anos",
+       x = "Ano",
+       y = "Produção (kg)",
+       fill = "Região") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::number_format(big.mark = ".", decimal.mark = ",", accuracy = 1))
+
+# Gráfico de produção total por espécie (todas as espécies)
+producao_por_especie <- dados_limpos %>%
+  group_by(Espécie) %>%
+  summarise(Producao_Total = sum(Producao_kg, na.rm = TRUE)) %>%
+  arrange(desc(Producao_Total))
+
+ggplot(producao_por_especie, aes(x = reorder(Espécie, Producao_Total), y = Producao_Total)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() + 
+  labs(title = "Produção Total por Espécie (Todas as Espécies)",
+       x = "Espécie",
+       y = "Produção Total (kg)") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::number_format(big.mark = ".", decimal.mark = ",", accuracy = 1))
+
+# Gráfico de série temporal da produção total anual
+producao_anual <- dados_limpos %>%
+  group_by(Ano) %>%
+  summarise(Producao_Total = sum(Producao_kg, na.rm = TRUE)) %>%
+  ungroup()
+ts_producao <- ts(producao_anual$Producao_Total, start = min(producao_anual$Ano))
+plot(ts_producao, main = "Produção Total Anual da Aquicultura Brasileira", xlab = "Ano", ylab = "Produção (kg)")
+
+# Mapa de Calor da Produção por Região e Espécie
+producao_heatmap_data <- dados_limpos %>%
+  group_by(Regiao, Espécie) %>%
+  summarise(Producao_Total = sum(Producao_kg, na.rm = TRUE), .groups = 'drop') %>%
+  dcast(Regiao ~ Espécie, value.var = "Producao_Total") %>%
+  column_to_rownames("Regiao")
+producao_heatmap_data[is.na(producao_heatmap_data)] <- 0
+heatmap(as.matrix(producao_heatmap_data),
+        main = "Mapa de Calor da Produção de Espécies por Região",
+        xlab = "Espécie",
+        ylab = "Região",
+        col = colorRampPalette(c("white", "red"))(50))
+
+# ----------------------------------------------------
+# 4. Análise de Componentes Principais (PCA)
+# ----------------------------------------------------
+
+print("Iniciando a Análise de Componentes Principais (PCA)...")
+print("Visualizando a relação entre regiões e a contribuição das espécies.")
+
+# Preparação dos dados para PCA
+pca_data <- dados_limpos %>%
+  group_by(Regiao, Espécie) %>%
+  summarise(Producao_Media = mean(Producao_kg, na.rm = TRUE),
+            Valor_Medio = mean(Reais_RS, na.rm = TRUE),
+            .groups = 'drop') %>%
+  pivot_wider(names_from = Espécie, values_from = c(Producao_Media, Valor_Medio)) %>%
+  column_to_rownames("Regiao") %>%
+  select(where(~!any(is.na(.))))
+pca_res <- prcomp(pca_data, scale. = TRUE)
+
+# Visualização de PCA aprimorada
+# 1. Gráfico das Regiões
+fviz_pca_ind(pca_res, 
+             geom.ind = "point", 
+             col.ind = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE) +
+  labs(title = "PCA - Associações entre Regiões (Similaridade de Perfis)")
+
+# 2. Gráfico das Variáveis (Espécies)
+fviz_pca_var(pca_res, 
+             col.var = "contrib",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE) +
+  labs(title = "PCA - Contribuição das Espécies para a Variabilidade")
+
+print("PCA concluída. Os gráficos mostram a similaridade entre as regiões e a contribuição das espécies.")
+
+# ----------------------------------------------------
+# 5. Clusterização com PAM e Dendrograma Completo
+# ----------------------------------------------------
+
+print("Realizando a Clusterização com o método PAM...")
+print("Determinando o número ideal de clusters...")
+
+# Padronização dos dados para clusterização
+df_scaled <- scale(pca_data)
+max_clusters <- nrow(df_scaled) - 1 
+
+if(max_clusters > 1) {
+  # Gráfico do Método do Cotovelo (Elbow Method): Encontra o "cotovelo" na curva.
+  cotovelo_plot <- fviz_nbclust(df_scaled, pam, method = "wss", k.max = max_clusters) +
+    labs(subtitle = "Método do Cotovelo (PAM)")
+  print(cotovelo_plot)
+  
+  # Análise da Silhueta: Valores próximos de 1 indicam clusters bem definidos.
+  silhueta_plot <- fviz_nbclust(df_scaled, pam, method = "silhouette", k.max = max_clusters) +
+    labs(subtitle = "Análise da Silhueta (PAM)")
+  print(silhueta_plot)
+  
+  # Aplicação da clusterização com k = 3, baseado nos gráficos
+  k <- 3
+  set.seed(123)
+  pam_res <- pam(df_scaled, k = k)
+  
+  # Visualização dos clusters com rótulos
+  fviz_cluster(pam_res, data = df_scaled,
+               ellipse.type = "convex",
+               palette = "jco",
+               ggtheme = theme_minimal()) +
+    labs(title = paste("Clusterização PAM (k =", k, ")"))
+  
+  # NOVO: Dendrograma de Regiões com Base em TODAS as Espécies
+  print("Gerando o dendrograma para visualizar os agrupamentos de regiões...")
+  
+  # Calcula a matriz de distâncias
+  dista_euclidiana_t <- dist(df_scaled, method = "euclidean")
+  
+  # Realiza a clusterização hierárquica
+  hc_result_t <- hclust(dista_euclidiana_t, method = "ward.D2")
+  
+  # Plota o dendrograma
+  plot(hc_result_t, 
+       main = "Dendrograma de Regiões (Todas as Espécies)",
+       xlab = "Região", 
+       ylab = "Distância Euclidiana")
+  
+  # Adiciona retângulos para destacar os clusters
+  rect.hclust(hc_result_t, k = 3, border = 2:4)
+  
+  # Tabela com as regiões e seus respectivos clusters
+  tabela_clusters <- data.frame(
+    Regiao = rownames(df_scaled),
+    Cluster = pam_res$clustering
+  )
+  print("Distribuição das Regiões por Cluster:")
+  print(tabela_clusters)
+  
+  # Centro de cluster (características de cada grupo)
+  print("Características dos Clusters (Centroides - dados padronizados):")
+  print(data.frame(pam_res$medoids))
+  
+} else {
+  print("A clusterização não pode ser realizada. Existem poucas regiões para formar grupos.")
+}
+
+print("Clusterização concluída. Os resultados indicam agrupamentos naturais das regiões com base nas características de produção de suas espécies.")
+
+# 5.2 Análise das Espécies por Cluster
+
+# Combina os dados originais com a atribuição de cluster
+dados_clusters_combinados <- dados_limpos %>%
+  inner_join(tabela_clusters, by = c("Regiao" = "Regiao")) %>%
+  group_by(Cluster, Espécie) %>%
+  summarise(Producao_Total = sum(Producao_kg, na.rm = TRUE), .groups = 'drop')
+
+# Loop para gerar um gráfico de barras para cada cluster
+clusters_unicos <- unique(dados_clusters_combinados$Cluster)
+for(cl in clusters_unicos) {
+  dados_cluster_filtrados <- dados_clusters_combinados %>%
+    filter(Cluster == cl) %>%
+    arrange(desc(Producao_Total)) %>%
+    slice_head(n = 5) # Top 5 espécies por cluster
+  
+  p <- ggplot(dados_cluster_filtrados, aes(x = reorder(Espécie, Producao_Total), y = Producao_Total)) +
+    geom_bar(stat = "identity", fill = "darkgreen") +
+    coord_flip() +
+    labs(title = paste("Produção das Top 5 Espécies no Cluster", cl),
+         subtitle = paste("Regiões no Cluster:", paste(tabela_clusters$Regiao[tabela_clusters$Cluster == cl], collapse = ", ")),
+         x = "Espécie",
+         y = "Produção Total (kg)") +
+    theme_minimal() +
+    scale_y_continuous(labels = scales::number_format(big.mark = ".", decimal.mark = ",", accuracy = 1))
+  print(p)
+}
+
+# ----------------------------------------------------
+# 6. Modelos Preditivos: Regressão Linear, ARIMA e Random Forest
+# ----------------------------------------------------
+
+print("Iniciando a modelagem preditiva e comparação de modelos...")
+
+# Preparação dos dados para predição
+df_producao_total <- dados_limpos %>%
+  group_by(Ano) %>%
+  summarise(Producao_Total = sum(Producao_kg, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(Ano)
+treino <- df_producao_total %>% filter(Ano < max(df_producao_total$Ano))
+teste <- df_producao_total %>% filter(Ano == max(df_producao_total$Ano))
+
+# Modelo 1: Regressão Linear
+modelo_lm_total <- lm(Producao_Total ~ Ano, data = treino)
+previsao_lm_total <- predict(modelo_lm_total, newdata = teste)
+mae_lm <- mean(abs(previsao_lm_total - teste$Producao_Total))
+print(paste("MAE do Modelo Linear (Produção Total):", mae_lm))
+
+# Modelo 2: ARIMA
+ts_producao_treino <- ts(treino$Producao_Total, start = min(treino$Ano))
+ts_producao_teste <- teste$Producao_Total
+modelo_arima_total <- auto.arima(ts_producao_treino)
+previsao_arima_total <- forecast(modelo_arima_total, h = 1)
+mae_arima <- abs(previsao_arima_total$mean - ts_producao_teste)
+print(paste("MAE do Modelo ARIMA (Produção Total):", mae_arima))
+
+# Modelo 3: Random Forest (com validação cruzada para evitar overfitting)
+train.control <- trainControl(method = "cv", number = 5)
+modelo_rf_total_cv <- train(Producao_Total ~ Ano, data = treino, method = "rf", trControl = train.control)
+previsao_rf_total <- predict(modelo_rf_total_cv, newdata = teste)
+mae_rf <- mean(abs(previsao_rf_total - teste$Producao_Total))
+print(paste("MAE do Modelo Random Forest (Produção Total):", mae_rf))
+
+# Gráfico comparativo dos 3 modelos preditivos
+df_comparacao <- data.frame(
+  Modelo = c("Regressão Linear", "ARIMA", "Random Forest"),
+  MAE = c(mae_lm, mae_arima, mae_rf)
+)
+
+ggplot(df_comparacao, aes(x = reorder(Modelo, -MAE), y = MAE, fill = Modelo)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Comparação da Precisão dos Modelos (MAE)",
+       subtitle = "Valores mais baixos indicam maior precisão na previsão de 2023",
+       x = "Modelo",
+       y = "Erro Médio Absoluto (MAE)") +
+  theme_minimal() +
+  coord_flip() +
+  scale_y_continuous(labels = scales::number_format(big.mark = ".", decimal.mark = ",", accuracy = 1))
+
+print("Comparação dos modelos concluída. O MAE indica o erro médio de cada modelo em relação ao dado real de 2023.")
+
+# ----------------------------------------------------
+# 7. Análise de Correlação (NOVO)
+# ----------------------------------------------------
+
+print("Iniciando a análise de correlação entre as variáveis...")
+
+# Prepara os dados de produção e valor para a análise de correlação
+df_cor <- dados_limpos %>%
+  group_by(Espécie) %>%
+  summarise(Producao_Total = sum(Producao_kg, na.rm = TRUE),
+            Valor_Total = sum(Reais_RS, na.rm = TRUE),
+            .groups = 'drop') %>%
+  filter(Producao_Total > 0 & Valor_Total > 0) %>%
+  pivot_longer(cols = c(Producao_Total, Valor_Total),
+               names_to = "Metrica",
+               values_to = "Valor") %>%
+  unite("Metrica_Especie", Metrica, Espécie, sep = "_") %>%
+  pivot_wider(names_from = Metrica_Especie, values_from = Valor)
+
+# Filtra colunas com variância próxima de zero para evitar erros
+nzv <- nearZeroVar(df_cor)
+if (length(nzv) > 0) {
+  df_cor_filtered <- df_cor[, -nzv]
+} else {
+  df_cor_filtered <- df_cor
+}
+
+# Verifica se o data.frame filtrado não está vazio antes de calcular a correlação
+if (ncol(df_cor_filtered) > 1) {
+  cor_matrix <- cor(df_cor_filtered, use = "pairwise.complete.obs")
+  
+  # Correlograma com visualização mais complexa
+  print("Gerando o Correlograma da Produção e Valor por Espécie...")
+  corrplot(cor_matrix,
+           type = "upper", # Mostra apenas a metade superior
+           order = "hclust", # Agrupa variáveis correlacionadas juntas
+           tl.col = "black", # Cor dos rótulos
+           tl.srt = 45, # Rotação dos rótulos
+           diag = FALSE, # Não mostra a correlação de 1.0 na diagonal
+           addCoef.col = "darkgrey", # Adiciona o valor da correlação na matriz
+           number.cex = 0.7)
+} else {
+  print("Dados insuficientes para gerar o Correlograma. A matriz de correlação teria apenas uma dimensão ou estaria vazia.")
+}
+
+print("Análise de correlação concluída.")
+
+# ----------------------------------------------------
+# 8. Previsão para as 3 Principais Espécies e Ostras/Mexilhões
+# ----------------------------------------------------
+
+print("Iniciando a previsão e visualização para as espécies selecionadas...")
+
+# Identifica as 3 principais espécies para a análise de previsão
+top_3_especies <- dados_limpos %>%
+  group_by(Espécie) %>%
+  summarise(Producao_Total = sum(Producao_kg, na.rm = TRUE)) %>%
+  arrange(desc(Producao_Total)) %>%
+  slice_head(n = 3) %>%
+  pull(Espécie) %>%
+  as.character() # Garante que os nomes sejam tratados como texto
+
+# Adiciona a espécie específica solicitada
+especies_para_previsao <- unique(c(top_3_especies, "Ostras, vieiras e mexilhões"))
+
+# Loop para gerar os gráficos de previsão e imprimir os valores
+for (especie in especies_para_previsao) {
+  print(paste("Realizando análise para a espécie:", especie))
+  
+  # Prepara os dados da espécie
+  df_especie_ts <- dados_limpos %>%
+    filter(Espécie == especie) %>%
+    group_by(Ano) %>%
+    summarise(Producao = sum(Producao_kg, na.rm = TRUE)) %>%
+    ungroup() %>%
+    arrange(Ano)
+  
+  # NOVO: Verifica se há dados suficientes para a modelagem
+  if(nrow(df_especie_ts) > 1) {
+    # Modelação e previsão (ARIMA)
+    ts_especie_final <- ts(df_especie_ts$Producao, start = min(df_especie_ts$Ano))
+    modelo_arima_final <- auto.arima(ts_especie_final)
+    previsao_arima_final <- forecast(modelo_arima_final, h = 7)
+    
+    # Cria o dataframe com os valores de previsão para impressão
+    df_previsao_valores <- data.frame(
+      Ano = (max(df_especie_ts$Ano) + 1):(max(df_especie_ts$Ano) + 7),
+      Previsao_Producao_kg = as.numeric(previsao_arima_final$mean)
+    )
+    
+    # Imprime os valores de previsão
+    print(paste("Previsão de Produção (kg) para", especie, "até 2030:"))
+    print(df_previsao_valores)
+    
+    # Cria o dataframe para o gráfico
+    df_previsao_arima <- data.frame(
+      Ano = c(df_especie_ts$Ano, df_previsao_valores$Ano),
+      Producao = c(df_especie_ts$Producao, df_previsao_valores$Previsao_Producao_kg),
+      Tipo = c(rep("Histórico", nrow(df_especie_ts)), rep("Previsão", 7))
+    )
+    
+    # Gera o gráfico de previsão
+    print(
+      ggplot(df_previsao_arima, aes(x = Ano, y = Producao, color = Tipo)) +
+        geom_line(linewidth = 1.2) +
+        geom_point(size = 3) +
+        labs(title = paste("Previsão de Produção para", especie, "(ARIMA) até 2030"),
+             x = "Ano",
+             y = "Produção (kg)",
+             color = "Tipo de Dado") +
+        theme_minimal() +
+        scale_x_continuous(breaks = seq(min(df_previsao_arima$Ano), max(df_previsao_arima$Ano), by = 2)) +
+        scale_y_continuous(labels = scales::number_format(big.mark = ".", decimal.mark = ",", accuracy = 1))
+    )
+  } else {
+    print(paste("Dados insuficientes para modelar a espécie:", especie))
+  }
+}
+rimorada.pdf' em seu diretório de trabalho.\n")
